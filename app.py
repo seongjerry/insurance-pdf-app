@@ -1,291 +1,165 @@
-"""
-보험 실적입력동의서 PDF 자동 기입 - 웹 애플리케이션
-Flask 로컬 서버: http://localhost:5000
-"""
-
-from __future__ import annotations
-
+import streamlit as st
+import fitz  # PyMuPDF
 import io
-import logging
 import os
-import sys
-from datetime import date
-from functools import wraps
-from pathlib import Path
+import json
 
-from flask import (
-    Flask,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    send_file,
-    session,
-    url_for,
-)
+# ==========================================
+# ⚙️ 관리자 세팅 구역 (서버 고정값)
+# ==========================================
+FONT_DIR = "fonts"
+os.makedirs(FONT_DIR, exist_ok=True)
+DEFAULT_FONT_NAME = "nanum"
+DEFAULT_FONT_PATH = os.path.join(FONT_DIR, "NanumGothic.ttf")
 
-# ---------------------------------------------------------------------------
-# 환경 변수 로드 (.env 파일 지원)
-# ---------------------------------------------------------------------------
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # python-dotenv 없어도 동작
+# 서버에 미리 준비해둘 백지 동의서 원본 파일명
+TEMPLATE_PDF_PATH = "template.pdf"
 
-# ---------------------------------------------------------------------------
-# 경로 감지: 개발 환경 vs PyInstaller EXE 번들
-#   BASE_DIR   = 사용자 파일 위치 (template.pdf, config.json, output/)
-#   BUNDLE_DIR = 코드·템플릿 번들 위치 (templates/, static/, pdf_filler.py)
-# ---------------------------------------------------------------------------
-if getattr(sys, "frozen", False):
-    # PyInstaller로 빌드된 EXE 실행 시
-    BASE_DIR   = Path(sys.executable).parent   # EXE가 있는 폴더
-    BUNDLE_DIR = Path(sys._MEIPASS)            # 임시 추출 번들 폴더
-else:
-    BASE_DIR   = Path(__file__).parent
-    BUNDLE_DIR = BASE_DIR
+# 서버에 미리 맞춰둔 고정 좌표값 (나중에 양식이 바뀌면 이 숫자만 바꾸면 됩니다)
+DEFAULT_COORDINATES = {
+    "보험사명": {"x": 140, "y": 188},
+    "상품명": {"x": 273, "y": 188, "fontsize": 9},
+    "증권번호": {"x": 480, "y": 188},
+    "신청일자_년": {"x": 230, "y": 632},
+    "신청일자_월": {"x": 285, "y": 632},
+    "신청일자_일": {"x": 330, "y": 632},
+    "계약자명": {"x": 160, "y": 673},
+    "피보험자명(선택)": {"x": 160, "y": 718}
+}
+# ==========================================
 
-sys.path.insert(0, str(BUNDLE_DIR))
-from pdf_filler import AppConfig, ConfigLoader, PDFFiller, load_data, BatchProcessor
+def get_font():
+    """한글 폰트 로드 (없으면 윈도우 기본 폰트로 대체)"""
+    if os.path.exists(DEFAULT_FONT_PATH):
+        return DEFAULT_FONT_PATH
+    win_font = "C:\\Windows\\Fonts\\malgun.ttf"
+    if os.path.exists(win_font):
+        return win_font
+    return None
 
-CONFIG_PATH  = BASE_DIR / "config.json"
-TEMPLATE_PDF = BASE_DIR / "template.pdf"
-OUTPUT_DIR   = BASE_DIR / "output"
+def create_dummy_template():
+    """사용자가 아직 진짜 template.pdf를 넣지 않았을 때 에러 방지용으로 임시 파일을 만듭니다."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(fitz.Point(50, 50), "[시스템 안내]", fontsize=20, color=(1,0,0))
+    page.insert_text(fitz.Point(50, 80), "여기에 사용할 실제 동의서 PDF 파일의 이름을", fontsize=15)
+    page.insert_text(fitz.Point(50, 100), "'template.pdf' 로 바꾸어 이 폴더에 넣어주세요.", fontsize=15)
+    doc.save(TEMPLATE_PDF_PATH)
+    doc.close()
 
-app = Flask(
-    __name__,
-    template_folder=str(BUNDLE_DIR / "templates"),
-    static_folder=str(BUNDLE_DIR / "static") if (BUNDLE_DIR / "static").exists() else None,
-)
-# SECRET_KEY: .env 또는 환경 변수에서 로드. 없으면 매 재시작마다 세션 초기화됨.
-app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
+def process_pdf(data_mapping):
+    """
+    미리 서버에 저장된 template.pdf를 열어서 데이터를 기입하고 바이트 형태로 반환합니다.
+    """
+    # 원본 파일이 없으면 안내용 임시 백지 PDF를 하나 생성합니다.
+    if not os.path.exists(TEMPLATE_PDF_PATH):
+        create_dummy_template()
+        
+    # 매번 업로드 받는 것이 아니라, 로컬에 깔린 template.pdf를 읽습니다.
+    doc = fitz.open(TEMPLATE_PDF_PATH)
+    font_path = get_font()
+    
+    for i in range(len(doc)):
+        page = doc[i]
+        
+        if font_path:
+            page.insert_font(fontname=DEFAULT_FONT_NAME, fontfile=font_path)
+            
+        for key, info in data_mapping.items():
+            text = info.get('value', '')
+            x = info.get('x', 0)
+            y = info.get('y', 0)
+            f_size = info.get('fontsize', 11)  # 개별적으로 폰트 사이즈가 지정되어 있으면 적용
+            
+            if not text:
+                continue
+                
+            if font_path:
+                page.insert_text(fitz.Point(x, y), str(text), fontname=DEFAULT_FONT_NAME, fontsize=f_size, color=(0,0,0))
+            else:
+                page.insert_text(fitz.Point(x, y), str(text), fontsize=f_size, color=(0,0,0))
+                
+    output_stream = io.BytesIO()
+    doc.save(output_stream)
+    doc.close()
+    
+    return output_stream.getvalue()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+def main():
+    # 화면을 가운데 정렬(centered)로 바꾸어 진짜 웹 서비스처럼 집중도 있게 구성
+    st.set_page_config(page_title="실적입력동의서생성기", page_icon="📄", layout="centered")
+    
+    # 크롬 등 브라우저의 자동 번역 기능이 한국어를 이상하게 오역하는 것을 방지합니다.
+    st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
+    
+    st.title("📄 실적입력동의서생성기")
+    st.markdown("아래 고객 정보를 입력하시면 지정된 양식에 맞추어 즉시 문서를 생성합니다.")
+    
+    # 폼 영역 (사용자는 여기만 신경 쓰면 됩니다)
+    with st.container():
+        st.subheader("📝 고객 및 상품 정보")
+        col1, col2 = st.columns(2)
+        with col1:
+            company_name = st.text_input("보험사명", "")
+            contractor_name = st.text_input("계약자명", "")
+            date_val = st.date_input("신청일자")
+        with col2:
+            product_name = st.text_input("상품명", "")
+            policy_number = st.text_input("증권번호", "")
+            insured_name = st.text_input("피보험자명(선택)", "")
+            
+        submit_btn = st.button("🚀 위 정보로 문서 생성하기", type="primary", use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# 인증 설정
-#   ADMIN_PASSWORD 가 설정되어 있으면 로그인이 필요합니다.
-#   설정되어 있지 않으면 인증 없이 접근 가능합니다 (개발/로컬 환경).
-# ---------------------------------------------------------------------------
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+    # 좌표 관리 영역 (일반 사용자에겐 숨김 처리. 관리자만 열어볼 수 있도록 토글 형태)
+    with st.expander("⚙️ [관리자용] 좌표 미세 조정 (양식이 바뀔 때만 열어서 수정)"):
+        st.warning("이곳의 좌표를 수정하면 새로 뽑히는 PDF의 글씨 위치가 바뀝니다.")
+        # key값을 부여하여 Streamlit 내부 캐시를 초기화하고 항상 최신 명칭을 불러오도록 강제합니다.
+        coords_json = st.text_area("JSON 좌표 매핑", value=json.dumps(DEFAULT_COORDINATES, ensure_ascii=False, indent=2), height=150, key="coords_json_v7")
+        try:
+            coords = json.loads(coords_json)
+        except json.JSONDecodeError:
+            st.error("좌표 형식이 올바르지 않습니다.")
+            coords = DEFAULT_COORDINATES
 
+    # 생성 로직
+    if submit_btn:
+        if not company_name or not contractor_name:
+            st.error("빈칸이 있습니다. 필수 정보(보험사명, 계약자명)를 입력해주세요!")
+            return
+            
+        data_mapping = {}
+        # 각 필드 정보에서 x, y 외에 fontsize 같은 추가 옵션이 있으면 그대로 덮어쓰기 위해 병합
+        if "보험사명" in coords: data_mapping["보험사명"] = {**coords["보험사명"], "value": company_name}
+        if "상품명" in coords: data_mapping["상품명"] = {**coords["상품명"], "value": product_name}
+        if "증권번호" in coords: data_mapping["증권번호"] = {**coords["증권번호"], "value": policy_number}
+        if "계약자명" in coords: data_mapping["계약자명"] = {**coords["계약자명"], "value": contractor_name}
+        if "피보험자명(선택)" in coords: data_mapping["피보험자명(선택)"] = {**coords["피보험자명(선택)"], "value": insured_name}
+        
+        # 날짜를 세 개(년, 월, 일)로 쪼개어서 독립적인 좌표로 뿌립니다.
+        # 기존 양식에 "20  년" 이 프린트되어 있으므로 "26"과 같이 뒤 2자리만 사용합니다.
+        year_str = str(date_val.year)[-2:]
+        month_str = f"{date_val.month:02d}"
+        day_str = f"{date_val.day:02d}"
+        
+        if "신청일자_년" in coords: data_mapping["신청일자_년"] = {**coords["신청일자_년"], "value": year_str}
+        if "신청일자_월" in coords: data_mapping["신청일자_월"] = {**coords["신청일자_월"], "value": month_str}
+        if "신청일자_일" in coords: data_mapping["신청일자_일"] = {**coords["신청일자_일"], "value": day_str}
+        
+        with st.spinner("선택된 양식에 정보를 합성 중입니다..."):
+            try:
+                result_pdf_bytes = process_pdf(data_mapping)
+                st.success("✅ 파일 처리가 완료되었습니다. 아래 다운로드 버튼을 누르세요.")
+                
+                # 다운로드 버튼
+                st.download_button(
+                    label=f"⬇️ [{contractor_name}] 실적입력동의서 다운로드",
+                    data=result_pdf_bytes,
+                    file_name=f"{contractor_name}_실적입력동의서.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"오류가 발생했습니다: {e}")
 
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if ADMIN_PASSWORD and not session.get("logged_in"):
-            return redirect(url_for("login", next=request.path))
-        return f(*args, **kwargs)
-    return decorated
-
-
-# 미처리 예외를 모두 로그에 기록 (EXE 환경 디버깅용)
-@app.errorhandler(Exception)
-def handle_all_errors(exc):
-    import traceback
-    logger.error("미처리 예외:\n%s", traceback.format_exc())
-    return f"서버 오류: {exc}", 500
-
-
-def load_config() -> AppConfig:
-    return ConfigLoader.load(CONFIG_PATH)
-
-
-# ---------------------------------------------------------------------------
-# 인증 라우트
-# ---------------------------------------------------------------------------
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    """로그인 페이지"""
-    # 이미 로그인된 경우 메인으로
-    if session.get("logged_in"):
-        return redirect(url_for("index"))
-
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-            session["logged_in"] = True
-            next_url = request.args.get("next") or url_for("index")
-            return redirect(next_url)
-        error = "아이디 또는 비밀번호가 올바르지 않습니다."
-
-    return render_template("login.html", error=error)
-
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
-# ---------------------------------------------------------------------------
-# 라우트
-# ---------------------------------------------------------------------------
-
-@app.route("/")
-@login_required
-def index():
-    """메인 폼 페이지"""
-    today = date.today()
-    return render_template(
-        "index.html",
-        today_year=today.year,
-        today_month=f"{today.month:02d}",
-        today_day=f"{today.day:02d}",
-        error=request.args.get("error"),
-    )
-
-
-@app.route("/generate", methods=["POST"])
-@login_required
-def generate():
-    """단건 폼 제출 → PDF 즉시 다운로드"""
-    try:
-        config = load_config()
-    except FileNotFoundError as e:
-        return redirect(url_for("index", error=f"설정 파일 오류: {e}"))
-
-    if not TEMPLATE_PDF.exists():
-        return redirect(url_for("index", error="template.pdf 파일이 없습니다."))
-
-    data = {
-        "보험회사명": request.form.get("보험회사명", "").strip(),
-        "상품명":    request.form.get("상품명", "").strip(),
-        "증권번호":  request.form.get("증권번호", "").strip(),
-        "계약자명":  request.form.get("계약자명", "").strip(),
-        "피보험자명": request.form.get("피보험자명", "").strip(),
-        "계약_년도": request.form.get("계약_년도", "").strip(),
-        "계약_월":   request.form.get("계약_월", "").strip(),
-        "계약_일":   request.form.get("계약_일", "").strip(),
-    }
-
-    # 필수값 검증
-    missing = [k for k in ["보험회사명", "상품명", "증권번호", "계약자명"] if not data[k]]
-    if missing:
-        return redirect(url_for("index", error=f"필수 항목 누락: {', '.join(missing)}"))
-
-    try:
-        filler = PDFFiller(TEMPLATE_PDF, config)
-        filler.fill(data)
-
-        buf = io.BytesIO()
-        import fitz
-        assert filler._doc is not None
-        filler._doc.save(buf, garbage=4, deflate=True)
-        filler._doc.close()
-        filler._doc = None
-        buf.seek(0)
-
-        filename = f"동의서_{data['계약자명']}_{data['증권번호']}.pdf"
-        logger.info("단건 생성: %s", filename)
-
-        return send_file(
-            buf,
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename,
-        )
-
-    except Exception as exc:
-        logger.error("PDF 생성 실패: %s", exc, exc_info=True)
-        return redirect(url_for("index", error=f"PDF 생성 실패: {exc}"))
-
-
-@app.route("/batch", methods=["POST"])
-@login_required
-def batch():
-    """CSV/Excel 업로드 → 일괄 처리 후 합본 PDF 다운로드"""
-    try:
-        config = load_config()
-    except FileNotFoundError as e:
-        return jsonify({"error": str(e)}), 500
-
-    if not TEMPLATE_PDF.exists():
-        return jsonify({"error": "template.pdf 파일이 없습니다."}), 500
-
-    file = request.files.get("datafile")
-    if not file or file.filename == "":
-        return redirect(url_for("index", error="파일을 선택하세요."))
-
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".csv", ".xlsx", ".xls"}:
-        return redirect(url_for("index", error="CSV 또는 Excel 파일만 지원합니다."))
-
-    # 업로드 파일을 임시 저장
-    import tempfile, pandas as pd
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        file.save(tmp_path)
-
-    try:
-        df = load_data(tmp_path)
-    except Exception as exc:
-        tmp_path.unlink(missing_ok=True)
-        return redirect(url_for("index", error=f"파일 읽기 실패: {exc}"))
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-    try:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        config.output.directory = str(OUTPUT_DIR)
-        processor = BatchProcessor(TEMPLATE_PDF, config)
-        saved = processor.run(df, merge=True)  # 항상 합본
-
-        merge_pdf_path = saved[0]
-        filename = merge_pdf_path.name
-        logger.info("일괄 생성 완료: %s (%d건)", filename, len(df))
-
-        return send_file(
-            merge_pdf_path,
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename,
-        )
-
-    except Exception as exc:
-        logger.error("일괄 처리 실패: %s", exc, exc_info=True)
-        return redirect(url_for("index", error=f"일괄 처리 실패: {exc}"))
-
-
-@app.route("/download-template")
-@login_required
-def download_template():
-    """샘플 CSV 파일 다운로드"""
-    csv_content = (
-        "보험회사명,상품명,증권번호,계약자명,피보험자명,계약_년도,계약_월,계약_일\n"
-        "삼성생명,무배당종신보험(2024),20240001234,홍길동,홍길동,2026,04,16\n"
-        "한화생명,변액유니버셜보험,20240005678,김철수,이순희,2026,04,17\n"
-    )
-    buf = io.BytesIO(csv_content.encode("utf-8-sig"))  # BOM 포함 (Excel 한글 호환)
-    return send_file(
-        buf,
-        mimetype="text/csv",
-        as_attachment=True,
-        download_name="동의서_샘플데이터.csv",
-    )
-
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "template_exists": TEMPLATE_PDF.exists(),
-        "config_exists": CONFIG_PATH.exists(),
-    })
-
-
-# ---------------------------------------------------------------------------
-# 실행
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=" * 55)
-    print("  인카금융서비스 동의서 자동 기입 시스템")
-    print("  브라우저에서 http://localhost:5000 으로 접속하세요")
-    print("=" * 55)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    main()
