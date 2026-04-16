@@ -106,7 +106,8 @@ def convert_canvas_to_bytes(canvas_result):
             data = img.getdata()
             new_data = []
             for item in data:
-                if item[0] > 240 and item[1] > 240 and item[2] > 240:
+                # 검은색 펜(0,0,0)과 안티앨리어싱 된 부분 보존, 연한 배경색은 전부 투명(0) 처리
+                if sum(item[:3]) > 600:
                     new_data.append((255, 255, 255, 0))
                 else:
                     new_data.append(item)
@@ -234,13 +235,13 @@ def main():
         ckey_suffix = st.session_state["canvas_key_suffix"]
         with c1:
             st.write("🧑‍💼 계약자 서명")
-            sign_c = st_canvas(stroke_width=2, stroke_color="#000", background_color="#fff", height=60, width=200, drawing_mode="freedraw", key=f"s_c_{ckey_suffix}")
+            sign_c = st_canvas(stroke_width=2, stroke_color="#000", background_color="#e8f4f8", height=120, width=250, drawing_mode="freedraw", key=f"s_c_{ckey_suffix}")
         with c2:
             st.write("🧑 피보험자 서명 (선택)")
-            sign_i = st_canvas(stroke_width=2, stroke_color="#000", background_color="#fff", height=60, width=200, drawing_mode="freedraw", key=f"s_i_{ckey_suffix}")
+            sign_i = st_canvas(stroke_width=2, stroke_color="#000", background_color="#e8f4f8", height=120, width=250, drawing_mode="freedraw", key=f"s_i_{ckey_suffix}")
         with c3:
             st.write("💼 모집자 서명 (완전판매용)")
-            sign_a = st_canvas(stroke_width=2, stroke_color="#000", background_color="#fff", height=60, width=200, drawing_mode="freedraw", key=f"s_a_{ckey_suffix}")
+            sign_a = st_canvas(stroke_width=2, stroke_color="#000", background_color="#e8f4f8", height=120, width=250, drawing_mode="freedraw", key=f"s_a_{ckey_suffix}")
             
         st.markdown("---")
         st.subheader("🖨️ 생성 및 다운로드할 서류 선택")
